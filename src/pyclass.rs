@@ -31,23 +31,60 @@ pub trait PyClass:
     type Frozen: Frozen;
 }
 
-pub(crate) fn create_type_object<T>(py: Python<'_>) -> *mut ffi::PyTypeObject
+pub(crate) trait HasPyTypeBuilderArgs {
+    const BUILDER_ARGS: PyTypeBuilderArgs;
+}
+
+impl<T> HasPyTypeBuilderArgs for T
 where
     T: PyClass,
 {
+    const BUILDER_ARGS: PyTypeBuilderArgs = PyTypeBuilderArgs {
+        doc: T::DOC,
+        dict_offset: T::dict_offset,
+        weaklist_offset: T::weaklist_offset,
+        base: T::BaseType::type_object_raw,
+        dealloc: tp_dealloc::<T>,
+        is_basetype: T::IS_BASETYPE,
+        is_mapping: T::IS_MAPPING,
+        items_iter: T::items_iter,
+        name: T::NAME,
+        module: T::MODULE,
+        basicsize: std::mem::size_of::<T::Layout>(),
+    };
+}
+
+pub(crate) struct PyTypeBuilderArgs {
+    doc: &'static str,
+    dict_offset: fn() -> Option<ffi::Py_ssize_t>,
+    weaklist_offset: fn() -> Option<ffi::Py_ssize_t>,
+    base: for<'py> fn(Python<'py>) -> *mut ffi::PyTypeObject,
+    dealloc: unsafe extern "C" fn(*mut ffi::PyObject),
+    is_basetype: bool,
+    is_mapping: bool,
+    items_iter: fn() -> PyClassItemsIter,
+    name: &'static str,
+    module: Option<&'static str>,
+    basicsize: usize,
+}
+
+pub(crate) fn create_type_object(
+    py: Python<'_>,
+    args: PyTypeBuilderArgs,
+) -> *mut ffi::PyTypeObject {
     match unsafe {
         PyTypeBuilder::default()
-            .with_type_doc(T::DOC)
-            .with_offsets(T::dict_offset(), T::weaklist_offset())
-            .with_slot(ffi::Py_tp_base, T::BaseType::type_object_raw(py))
-            .with_slot(ffi::Py_tp_dealloc, tp_dealloc::<T> as *mut c_void)
-            .set_is_basetype(T::IS_BASETYPE)
-            .set_is_mapping(T::IS_MAPPING)
-            .with_class_items(T::items_iter())
-            .build(py, T::NAME, T::MODULE, std::mem::size_of::<T::Layout>())
+            .with_type_doc(args.doc)
+            .with_offsets((args.dict_offset)(), (args.weaklist_offset)())
+            .with_slot(ffi::Py_tp_base, (args.base)(py))
+            .with_slot(ffi::Py_tp_dealloc, args.dealloc as *mut c_void)
+            .set_is_basetype(args.is_basetype)
+            .set_is_mapping(args.is_mapping)
+            .with_class_items((args.items_iter)())
+            .build(py, args.name, args.module, args.basicsize)
     } {
         Ok(type_object) => type_object,
-        Err(e) => type_object_creation_failed(py, e, T::NAME),
+        Err(e) => type_object_creation_failed(py, e, args.name),
     }
 }
 
